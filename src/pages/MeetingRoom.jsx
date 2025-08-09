@@ -366,10 +366,14 @@ const MeetingRoom = () => {
           )
           
           // Handle the response
-          if (result && result.data && result.data.segment) {
-            const segment = result.data.segment
-            // Send to socket for real-time updates
-            socket.sendTranscriptionSegment(meeting._id, segment)
+          if (result && result.data) {
+            if (result.data.useWebSpeechAPI) {
+              console.log('Using Web Speech API for transcription as suggested by server')
+            } else if (result.data.segment) {
+              const segment = result.data.segment
+              // Send to socket for real-time updates
+              socket.sendTranscriptionSegment(meeting._id, segment)
+            }
           }
         } catch (error) {
           console.error('Failed to process audio chunk:', error)
@@ -417,7 +421,7 @@ const MeetingRoom = () => {
           }
         }
         
-        webSpeechRef.current.onResult = ({ text, isFinal }) => {
+        webSpeechRef.current.onResult = async ({ text, isFinal }) => {
           if (!text) return
           
           // Only update if this is a final result or significantly different from last interim
@@ -456,6 +460,22 @@ const MeetingRoom = () => {
                 return prev
               }
             })
+            
+            // Save final segments to backend
+            if (isFinal && meeting?._id) {
+              try {
+                await transcriptionsAPI.addSegment(meeting._id, {
+                  text: text.trim(),
+                  startTime: Date.now() / 1000,
+                  endTime: Date.now() / 1000,
+                  speaker: { id: user.id, name: user.name },
+                  confidence: 0.9
+                })
+                console.log('Segment saved to backend:', text.substring(0, 50) + '...')
+              } catch (error) {
+                console.error('Failed to save segment to backend:', error)
+              }
+            }
             
             if (!isFinal) {
               lastInterimText = text
@@ -584,7 +604,7 @@ const MeetingRoom = () => {
                 if (error.response?.status === 404) {
                   const message = error.response?.data?.message || 'No content found'
                   if (message.includes('transcription content')) {
-                    toast.info('Meeting ended. No transcription content available for AI summary.')
+                    toast('Meeting ended. No transcription content available for AI summary.')
                   } else {
                     toast.error('No transcription found for summary generation')
                   }

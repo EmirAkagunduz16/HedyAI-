@@ -9,7 +9,17 @@ import { generateSegmentId, rebuildFullText } from '../utils/transcription.js'
 import { updateUserStats } from '../utils/user.js'
 
 // Initialize AI services
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
+let genAI = null
+if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY !== 'your_gemini_api_key_here') {
+  try {
+    genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
+    console.log('✅ Gemini AI client initialized successfully')
+  } catch (error) {
+    console.error('❌ Failed to initialize Gemini AI client:', error.message)
+  }
+} else {
+  console.warn('⚠️ GEMINI_API_KEY not found or not configured. AI features will be limited.')
+}
 
 // Initialize Groq client only if API key is available
 let groq = null
@@ -71,6 +81,18 @@ export const transcribeAudio = async (req, res, next) => {
       transcription = await Transcription.create({
         meeting: meetingId,
         language: req.user.settings?.language || 'en-US'
+      })
+    }
+
+    // Check if GROQ API is available
+    if (!groq) {
+      return res.json({
+        success: true,
+        message: 'Speech transcription is not available. Please use Web Speech API in your browser.',
+        data: { 
+          segment: null,
+          useWebSpeechAPI: true 
+        }
       })
     }
 
@@ -377,6 +399,13 @@ async function transcribeAudioData(audioData) {
 
 async function enhanceTranscriptionWithGemini(text) {
   try {
+    if (!genAI) {
+      // If Gemini is not available, return the original text with basic cleanup
+      return text.trim()
+        .replace(/\s+/g, ' ')  // Remove extra spaces
+        .replace(/([.!?])\s*([a-z])/g, (match, p1, p2) => p1 + ' ' + p2.toUpperCase()) // Capitalize after punctuation
+    }
+    
     const model = genAI.getGenerativeModel({ model: "gemini-pro" })
     
     const prompt = `
@@ -398,6 +427,35 @@ async function enhanceTranscriptionWithGemini(text) {
 
 async function generateAIResponse(question, transcription) {
   try {
+    if (!genAI) {
+      // If Gemini is not available, provide a simple keyword-based response
+      const context = transcription.fullText || transcription.segments.map(s => s.text).join(' ')
+      const questionWords = question.toLowerCase().split(' ').filter(word => word.length > 3)
+      
+      // Find related segments
+      const relatedSegments = transcription.segments
+        .filter(segment => 
+          questionWords.some(word => 
+            segment.text.toLowerCase().includes(word)
+          )
+        )
+      
+      if (relatedSegments.length > 0) {
+        const relevantText = relatedSegments.map(s => s.text).join(' ')
+        return {
+          text: `Based on the transcription: "${relevantText.substring(0, 500)}${relevantText.length > 500 ? '...' : ''}"`,
+          confidence: 0.6,
+          relatedSegments: relatedSegments.map(s => s.id).slice(0, 3)
+        }
+      } else {
+        return {
+          text: "I couldn't find specific information about that in the meeting transcription.",
+          confidence: 0.3,
+          relatedSegments: []
+        }
+      }
+    }
+    
     const model = genAI.getGenerativeModel({ model: "gemini-pro" })
     
     const context = transcription.fullText || transcription.segments.map(s => s.text).join(' ')
@@ -436,8 +494,29 @@ async function generateAIResponse(question, transcription) {
     }
   } catch (error) {
     console.error('AI response generation error:', error)
+    
+    // Provide fallback response with basic search
+    const context = transcription.fullText || transcription.segments.map(s => s.text).join(' ')
+    const questionWords = question.toLowerCase().split(' ').filter(word => word.length > 3)
+    
+    const relatedSegments = transcription.segments
+      .filter(segment => 
+        questionWords.some(word => 
+          segment.text.toLowerCase().includes(word)
+        )
+      )
+    
+    if (relatedSegments.length > 0) {
+      const relevantText = relatedSegments.map(s => s.text).join(' ')
+      return {
+        text: `I found this in the transcription: "${relevantText.substring(0, 500)}${relevantText.length > 500 ? '...' : ''}"`,
+        confidence: 0.5,
+        relatedSegments: relatedSegments.map(s => s.id).slice(0, 3)
+      }
+    }
+    
     return {
-      text: "I'm sorry, I encountered an error while processing your question. Please try again.",
+      text: "I'm having trouble accessing the AI service. Please try again later.",
       confidence: 0.0,
       relatedSegments: []
     }
@@ -446,6 +525,47 @@ async function generateAIResponse(question, transcription) {
 
 async function generateMeetingInsights(transcriptionText) {
   try {
+    if (!genAI) {
+      // If Gemini is not available, provide basic insights based on text analysis
+      const words = transcriptionText.split(' ')
+      const sentences = transcriptionText.split(/[.!?]+/).filter(s => s.trim().length > 0)
+      
+      // Extract key points (first few sentences)
+      const keyPoints = sentences.slice(0, 3).map(s => s.trim())
+      
+      // Look for action items (sentences with action words)
+      const actionWords = ['will', 'should', 'need to', 'must', 'have to', 'going to', 'plan to']
+      const actionItems = sentences
+        .filter(s => actionWords.some(word => s.toLowerCase().includes(word)))
+        .slice(0, 3)
+        .map(s => ({
+          task: s.trim(),
+          assignee: 'Team',
+          priority: 'medium'
+        }))
+      
+      // Extract topics (common nouns/phrases - simplified)
+      const topics = []
+      if (transcriptionText.toLowerCase().includes('business')) topics.push('Business Updates')
+      if (transcriptionText.toLowerCase().includes('project')) topics.push('Project Discussion')
+      if (transcriptionText.toLowerCase().includes('board')) topics.push('Board Matters')
+      if (transcriptionText.toLowerCase().includes('colleagues')) topics.push('Team Collaboration')
+      if (topics.length === 0) topics.push('General Discussion')
+      
+      return {
+        summary: sentences.slice(0, 2).join(' ').trim() || "Meeting discussion captured.",
+        keyPoints: keyPoints.length > 0 ? keyPoints : ["Meeting notes recorded"],
+        actionItems,
+        topics,
+        decisions: [],
+        questions: [],
+        sentiment: {
+          overall: 'neutral',
+          score: 0.5
+        }
+      }
+    }
+    
     const model = genAI.getGenerativeModel({ model: "gemini-pro" })
     
     const prompt = `

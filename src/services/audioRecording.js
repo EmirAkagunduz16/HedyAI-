@@ -230,11 +230,19 @@ class AudioRecordingService {
   async processAudioChunk(audioData, meetingId, speaker) {
     try {
       // Send audio data to backend for transcription
-      const result = await aiAPI.transcribeAudio(meetingId, audioData, speaker)
-      return result.data.segment
+      const response = await aiAPI.transcribeAudio(meetingId, audioData, speaker)
+      
+      // Check if we should use Web Speech API instead
+      if (response.data?.data?.useWebSpeechAPI) {
+        console.log('Server suggests using Web Speech API for transcription')
+        return response.data
+      }
+      
+      return response.data
     } catch (error) {
       console.error('Failed to process audio chunk:', error)
-      throw error
+      // Return null instead of throwing to allow graceful fallback
+      return null
     }
   }
 
