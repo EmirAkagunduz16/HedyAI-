@@ -46,3 +46,6 @@ lerna-debug.log*
 .temp/
 .tmp/
 .history/
+
+# Audio processing temporary files
+backend/temp/

@@ -31,6 +31,11 @@ const Dashboard = () => {
   }, [])
 
   const loadDashboardData = async () => {
+    // Prevent multiple simultaneous calls
+    if (loading) {
+      return
+    }
+
     try {
       setLoading(true)
       

@@ -1,11 +1,45 @@
 import { GoogleGenerativeAI } from '@google/generative-ai'
+import Groq from 'groq-sdk'
+import fs from 'fs'
+import path from 'path'
+import { fileURLToPath } from 'url'
 import Meeting from '../models/Meeting.js'
 import Transcription from '../models/Transcription.js'
 import { generateSegmentId } from '../utils/transcription.js'
 import { updateUserStats } from '../utils/user.js'
 
-// Initialize Gemini AI
+// Initialize AI services
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
+
+// Initialize Groq client only if API key is available
+let groq = null
+console.log('Checking for GROQ_API_KEY:', process.env.GROQ_API_KEY ? 'Found' : 'Not found')
+if (process.env.GROQ_API_KEY) {
+  try {
+    groq = new Groq({
+      apiKey: process.env.GROQ_API_KEY
+    })
+    console.log('✅ Groq client initialized successfully')
+  } catch (error) {
+    console.error('❌ Failed to initialize Groq client:', error.message)
+  }
+} else {
+  console.warn('⚠️ GROQ_API_KEY not found. Speech transcription will be disabled.')
+}
+
+/**
+ * AI Audio Transcription Flow:
+ * 1. Frontend sends audio chunks (3-second intervals) as base64
+ * 2. Backend saves as temporary audio files (.webm format)
+ * 3. Groq Whisper API transcribes the audio to text
+ * 4. Gemini AI enhances the transcription for better readability
+ * 5. Creates transcription segments and sends to frontend
+ * 6. Users can chat about transcriptions using Gemini AI
+ */
+
+// Get current directory for ES modules
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
 
 export const transcribeAudio = async (req, res, next) => {
   try {
@@ -40,9 +74,20 @@ export const transcribeAudio = async (req, res, next) => {
       })
     }
 
-    // Simulate transcription and enhance with Gemini
-    const simulatedText = await simulateTranscription(audioData)
-    const enhancedText = await enhanceTranscriptionWithGemini(simulatedText)
+    // Transcribe audio using Groq Whisper API
+    const transcribedText = await transcribeAudioData(audioData)
+    
+    // Only create segment if we have actual text
+    if (!transcribedText || transcribedText.trim().length === 0) {
+      return res.json({
+        success: true,
+        message: 'Audio processed but no speech detected',
+        data: { segment: null }
+      })
+    }
+    
+    // Enhance transcription with Gemini for better formatting and context
+    const enhancedText = await enhanceTranscriptionWithGemini(transcribedText)
     
     // Create segment
     const segment = {
@@ -251,17 +296,52 @@ export const getInsights = async (req, res, next) => {
 }
 
 // Helper functions
-async function simulateTranscription(audioData) {
-  const sampleTexts = [
-    "Welcome everyone to our weekly standup meeting. Let's start by going through what we accomplished last week.",
-    "Thanks for that update. I completed the user authentication module and started working on the dashboard components.",
-    "Great work on that. I finished the API integration for the transcription service and it's working really well.",
-    "Let's discuss the upcoming sprint planning and what we need to prioritize for next week.",
-    "I think we should focus on the frontend components and make sure the user experience is smooth.",
-    "Agreed. We also need to ensure our backend API is robust and can handle the expected load."
-  ]
-  
-  return sampleTexts[Math.floor(Math.random() * sampleTexts.length)]
+async function transcribeAudioData(audioData) {
+  if (!audioData) {
+    console.log('No audio data provided')
+    return ''
+  }
+
+  if (!groq) {
+    console.log('Groq client not initialized (API key missing)')
+    return ''
+  }
+
+  try {
+    // Create temporary directory for audio files if it doesn't exist
+    const tempDir = path.join(__dirname, '../temp/audio')
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true })
+    }
+
+    // Generate unique filename
+    const filename = `audio_${Date.now()}_${Math.random().toString(36).substr(2, 9)}.webm`
+    const audioPath = path.join(tempDir, filename)
+
+    // Convert base64 (data from MediaRecorder) to buffer; normalize header-less base64
+    const cleanBase64 = audioData.includes(',') ? audioData.split(',')[1] : audioData
+    const audioBuffer = Buffer.from(cleanBase64, 'base64')
+    fs.writeFileSync(audioPath, audioBuffer)
+
+    // Transcribe using Groq Whisper API
+    const transcription = await groq.audio.transcriptions.create({
+      file: fs.createReadStream(audioPath),
+      model: "whisper-large-v3",
+      response_format: "verbose_json",
+      language: "en", // You can make this dynamic based on user settings
+      temperature: 0.1
+    })
+
+    // Clean up temporary file
+    fs.unlinkSync(audioPath)
+
+    console.log('Groq transcription result:', transcription.text)
+    return transcription.text || ''
+
+  } catch (error) {
+    console.error('Error transcribing audio with Groq:', error)
+    return ''
+  }
 }
 
 async function enhanceTranscriptionWithGemini(text) {

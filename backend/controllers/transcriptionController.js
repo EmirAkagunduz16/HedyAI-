@@ -27,14 +27,23 @@ export const getTranscription = async (req, res, next) => {
       })
     }
 
-    const transcription = await Transcription.findOne({ meeting: meetingId })
+    let transcription = await Transcription.findOne({ meeting: meetingId })
       .populate('chatMessages.user', 'name email avatar')
 
+    // If no transcription exists, return an empty one instead of 404
     if (!transcription) {
-      return res.status(404).json({
-        success: false,
-        message: 'Transcription not found'
-      })
+      transcription = {
+        meeting: meetingId,
+        segments: [],
+        chatMessages: [],
+        fullText: '',
+        language: 'en-US',
+        totalWords: 0,
+        speakerCount: 0,
+        avgConfidence: 0,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      }
     }
 
     res.json({

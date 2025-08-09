@@ -24,6 +24,7 @@ import { useAuth } from '../context/AuthContext'
 import { meetingsAPI, transcriptionsAPI, aiAPI } from '../services/api'
 import { useSocket, createMeetingHandlers } from '../services/socket'
 import AudioRecordingService, { AudioUtils } from '../services/audioRecording'
+import WebSpeechService from '../services/webSpeech'
 import toast from 'react-hot-toast'
 
 const MeetingRoom = () => {
@@ -46,6 +47,7 @@ const MeetingRoom = () => {
   // Transcription states
   const [transcription, setTranscription] = useState([])
   const [transcriptionData, setTranscriptionData] = useState(null)
+  const [transcriptionLoading, setTranscriptionLoading] = useState(false)
   
   // Chat states
   const [chatMessages, setChatMessages] = useState([])
@@ -61,11 +63,20 @@ const MeetingRoom = () => {
   
   // Refs
   const audioRecordingRef = useRef(null)
+  const webSpeechRef = useRef(null)
   const transcriptionRef = useRef(null)
   const durationIntervalRef = useRef(null)
+  // Run-once and concurrency guards (helps under React StrictMode)
+  const initializedRef = useRef(false)
+  const loadingMeetingRef = useRef(false)
+  const creatingMeetingRef = useRef(false)
 
   // Initialize meeting and socket connections
   useEffect(() => {
+    // Prevent double-run in React StrictMode
+    if (initializedRef.current) return
+    initializedRef.current = true
+
     if (id) {
       loadMeeting()
     } else {
@@ -78,7 +89,7 @@ const MeetingRoom = () => {
       if (audioRecordingRef.current) {
         audioRecordingRef.current.destroy()
       }
-      if (socket.isConnected() && meeting) {
+      if (socket.isConnected() && meeting?._id) {
         socket.leaveMeeting(meeting._id)
       }
     }
@@ -86,11 +97,14 @@ const MeetingRoom = () => {
 
   // Set up socket event handlers
   useEffect(() => {
-    if (meeting && socket.isConnected()) {
+    if (meeting?._id && socket.isConnected()) {
       const handlers = createMeetingHandlers({
         onMeetingJoined: (data) => {
           setParticipants(data.participants)
-          loadTranscription()
+          // Only load transcription once when first joining
+          if (!transcriptionData) {
+            loadTranscription()
+          }
         },
         onParticipantJoined: (data) => {
           setParticipants(prev => [...prev, data.user])
@@ -118,7 +132,7 @@ const MeetingRoom = () => {
         socket.on(event, handler)
       })
 
-      // Join meeting room
+      // Join meeting room only once
       socket.joinMeeting(meeting._id)
 
       return () => {
@@ -128,7 +142,7 @@ const MeetingRoom = () => {
         })
       }
     }
-  }, [meeting, socket])
+  }, [meeting?._id]) // Only depend on meeting ID, not the entire socket object
 
   // Update duration timer
   useEffect(() => {
@@ -157,7 +171,9 @@ const MeetingRoom = () => {
   }, [transcription])
 
   const loadMeeting = async () => {
+    if (loadingMeetingRef.current) return
     try {
+      loadingMeetingRef.current = true
       setLoading(true)
       const response = await meetingsAPI.getMeeting(id)
       
@@ -177,12 +193,15 @@ const MeetingRoom = () => {
       toast.error('Failed to load meeting')
       navigate('/dashboard')
     } finally {
+      loadingMeetingRef.current = false
       setLoading(false)
     }
   }
 
   const createNewMeeting = async () => {
+    if (creatingMeetingRef.current) return
     try {
+      creatingMeetingRef.current = true
       setLoading(true)
       const response = await meetingsAPI.createMeeting({
         title: `${user.name}'s Meeting`,
@@ -198,12 +217,19 @@ const MeetingRoom = () => {
       toast.error('Failed to create meeting')
       navigate('/dashboard')
     } finally {
+      creatingMeetingRef.current = false
       setLoading(false)
     }
   }
 
   const loadTranscription = async () => {
+    // Prevent multiple simultaneous calls
+    if (transcriptionLoading || !meeting?._id) {
+      return
+    }
+
     try {
+      setTranscriptionLoading(true)
       const response = await transcriptionsAPI.getTranscription(meeting._id)
       if (response.success) {
         setTranscriptionData(response.data.transcription)
@@ -211,7 +237,16 @@ const MeetingRoom = () => {
         setChatMessages(response.data.transcription.chatMessages || [])
       }
     } catch (error) {
-      console.error('Failed to load transcription:', error)
+      // For 404 errors (no transcription yet), just set empty state
+      if (error.response?.status === 404) {
+        setTranscriptionData(null)
+        setTranscription([])
+        setChatMessages([])
+      } else {
+        console.error('Failed to load transcription:', error)
+      }
+    } finally {
+      setTranscriptionLoading(false)
     }
   }
 
@@ -227,16 +262,26 @@ const MeetingRoom = () => {
       audioRecordingRef.current.onDataAvailable = async (audioData) => {
         try {
           // Process audio chunk with AI
-          const segment = await audioRecordingRef.current.processAudioChunk(
+          console.log('Processing audio chunk...')
+          const result = await audioRecordingRef.current.processAudioChunk(
             audioData, 
             meeting._id, 
             { id: user.id, name: user.name }
           )
           
-          // Send to socket for real-time updates
-          socket.sendTranscriptionSegment(meeting._id, segment)
+          // Handle the response
+          if (result && result.data && result.data.segment) {
+            const segment = result.data.segment
+            console.log('Transcription received:', segment.text)
+            
+            // Send to socket for real-time updates
+            socket.sendTranscriptionSegment(meeting._id, segment)
+          } else {
+            console.log('No speech detected in audio chunk')
+          }
         } catch (error) {
           console.error('Failed to process audio chunk:', error)
+          // Don't show error to user as this is expected to happen sometimes
         }
       }
 
@@ -263,6 +308,25 @@ const MeetingRoom = () => {
 
       await initializeAudioRecording()
       await audioRecordingRef.current.startRecording()
+
+      // Start Web Speech API for instant on-screen text (best-effort)
+      if (!webSpeechRef.current) webSpeechRef.current = new WebSpeechService()
+      if (webSpeechRef.current.isSupported) {
+        webSpeechRef.current.onResult = ({ text, isFinal }) => {
+          if (!text) return
+          // Render immediate transcript locally, tag it clearly
+          const segment = {
+            id: `local_${Date.now()}`,
+            text,
+            startTime: Date.now() / 1000,
+            endTime: Date.now() / 1000,
+            speaker: { id: user.id, name: user.name },
+            confidence: 0.85
+          }
+          setTranscription((prev) => [...prev, segment])
+        }
+        webSpeechRef.current.start('en-US')
+      }
       
       // Start meeting if not already started
       if (meeting.status !== 'live') {
@@ -305,6 +369,9 @@ const MeetingRoom = () => {
     try {
       if (audioRecordingRef.current) {
         audioRecordingRef.current.stopRecording()
+      }
+      if (webSpeechRef.current) {
+        webSpeechRef.current.stop()
       }
       
       setIsRecording(false)
@@ -560,7 +627,7 @@ const MeetingRoom = () => {
                     ) : (
                       transcription.map((entry, index) => (
                         <motion.div
-                          key={entry.id || index}
+                          key={`${entry.id || 'segment'}-${index}-${entry.startTime || Date.now()}`}
                           initial={{ opacity: 0, y: 10 }}
                           animate={{ opacity: 1, y: 0 }}
                           className="border-l-4 border-primary-500 pl-4 py-2"
@@ -618,9 +685,9 @@ const MeetingRoom = () => {
                     <p>Ask questions about the transcription</p>
                   </div>
                 ) : (
-                  chatMessages.map((message) => (
+                  chatMessages.map((message, index) => (
                     <div
-                      key={message.id || message._id}
+                      key={`${message.id || message._id || 'msg'}-${index}-${message.timestamp || Date.now()}`}
                       className={`flex ${message.type === 'user' ? 'justify-end' : 'justify-start'}`}
                     >
                       <div

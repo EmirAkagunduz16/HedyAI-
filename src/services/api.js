@@ -10,6 +10,9 @@ const api = axios.create({
   },
 })
 
+// Error throttling to prevent toast spam
+const errorThrottle = new Map()
+
 // Request interceptor to add auth token
 api.interceptors.request.use(
   (config) => {
@@ -19,9 +22,7 @@ api.interceptors.request.use(
     }
     return config
   },
-  (error) => {
-    return Promise.reject(error)
-  }
+  (error) => Promise.reject(error)
 )
 
 // Response interceptor to handle errors
@@ -40,9 +41,20 @@ api.interceptors.response.use(
       return Promise.reject(error)
     }
     
-    // Show error toast for non-auth errors
-    if (error.response?.status !== 422) { // Don't show toast for validation errors
-      toast.error(message)
+    // Don't show toast for validation errors or transcription 404s (normal for new meetings)
+    const shouldShowToast = error.response?.status !== 422 && 
+                          !(error.response?.status === 404 && error.config?.url?.includes('/transcriptions/meeting/'))
+    
+    if (shouldShowToast) {
+      // Throttle identical error messages to prevent spam
+      const errorKey = `${error.response?.status || 'network'}-${error.config?.url || 'unknown'}`
+      const now = Date.now()
+      const lastShown = errorThrottle.get(errorKey)
+      
+      if (!lastShown || now - lastShown > 5000) { // Show same error max once per 5 seconds
+        toast.error(message)
+        errorThrottle.set(errorKey, now)
+      }
     }
     
     return Promise.reject(error)

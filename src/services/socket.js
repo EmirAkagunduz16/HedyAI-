@@ -5,6 +5,7 @@ class SocketService {
   constructor() {
     this.socket = null
     this.listeners = new Map()
+    this.currentMeetingId = null
   }
 
   connect(token) {
@@ -38,7 +39,10 @@ class SocketService {
 
     this.socket.on('error', (error) => {
       console.error('Socket error:', error)
-      toast.error(error.message || 'Connection error')
+      // Only show toast for non-connection related errors
+      if (error.type !== 'TransportError' && error.type !== 'polling-error') {
+        toast.error(error.message || 'Connection error')
+      }
     })
 
     this.socket.on('connected', (data) => {
@@ -51,6 +55,7 @@ class SocketService {
       this.socket.disconnect()
       this.socket = null
       this.listeners.clear()
+      this.currentMeetingId = null
     }
   }
 
@@ -64,6 +69,13 @@ class SocketService {
       throw new Error('Socket not connected')
     }
     
+    // Prevent joining the same meeting multiple times
+    if (this.currentMeetingId === meetingId) {
+      console.log('Already joined meeting:', meetingId)
+      return
+    }
+    
+    this.currentMeetingId = meetingId
     this.socket.emit('join-meeting', { meetingId })
   }
 
@@ -71,6 +83,7 @@ class SocketService {
     if (!this.socket) return
     
     this.socket.emit('leave-meeting', { meetingId })
+    this.currentMeetingId = null
   }
 
   // Transcription methods
@@ -191,7 +204,8 @@ export const createMeetingHandlers = (callbacks = {}) => {
     
     'participant-left': (data) => {
       console.log('Participant left:', data)
-      toast.info(`${data.user.name} left the meeting`)
+      // react-hot-toast does not have toast.info; use neutral toast
+      toast(`${data.user.name} left the meeting`)
       callbacks.onParticipantLeft?.(data)
     },
 
@@ -211,7 +225,7 @@ export const createMeetingHandlers = (callbacks = {}) => {
     'recording-status-changed': (data) => {
       console.log('Recording status changed:', data)
       const status = data.isRecording ? 'started' : 'stopped'
-      toast.info(`Recording ${status}`)
+      toast(`Recording ${status}`)
       callbacks.onRecordingStatusChanged?.(data)
     },
 

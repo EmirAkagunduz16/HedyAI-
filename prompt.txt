@@ -1,1 +1,13 @@
-I just want from you is move the these such code of business logicc  in routes files move to controller files or something else. Routes files should have routes things ok?
+
+
+
+
+
+
+
+
+
+
+
+
+

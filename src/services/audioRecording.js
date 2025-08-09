@@ -61,13 +61,16 @@ class AudioRecordingService {
       if (event.data.size > 0) {
         this.chunks.push(event.data)
         
-        // Convert to base64 for API transmission
-        const reader = new FileReader()
-        reader.onloadend = () => {
-          const base64data = reader.result.split(',')[1]
-          this.onDataAvailable?.(base64data)
+        // Only process chunks larger than 1KB (to avoid processing silence)
+        if (event.data.size > 1024) {
+          // Convert to base64 for API transmission
+          const reader = new FileReader()
+          reader.onloadend = () => {
+            const base64data = reader.result.split(',')[1]
+            this.onDataAvailable?.(base64data)
+          }
+          reader.readAsDataURL(event.data)
         }
-        reader.readAsDataURL(event.data)
       }
     }
 
@@ -123,8 +126,8 @@ class AudioRecordingService {
     this.recordingStartTime = Date.now()
     this.pausedDuration = 0
 
-    // Start recording with 1-second chunks for real-time processing
-    this.mediaRecorder.start(1000)
+    // Start recording with 3-second chunks for better transcription accuracy
+    this.mediaRecorder.start(3000)
     
     // Start audio level monitoring
     this.startAudioLevelMonitoring()
