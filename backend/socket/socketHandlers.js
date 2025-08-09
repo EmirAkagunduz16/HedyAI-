@@ -67,6 +67,7 @@ export const setupSocketHandlers = (io) => {
         // Join socket room
         socket.join(`meeting-${meetingId}`)
         socket.currentMeetingId = meetingId
+        console.log(`User ${socket.user.name} set currentMeetingId to: ${meetingId}`)
 
         // Add to meeting room tracking
         if (!meetingRooms.has(meetingId)) {
@@ -165,7 +166,16 @@ export const setupSocketHandlers = (io) => {
           }
         })
 
+        // Ensure fullText is updated for AI summary generation
+        transcription.fullText = transcription.segments.map(s => s.text).join(' ')
+        
+        // Update word count and other stats
+        transcription.totalWords = transcription.fullText.split(' ').filter(word => word.trim()).length
+        transcription.speakerCount = new Set(transcription.segments.map(s => s.speaker.id)).size
+        transcription.avgConfidence = transcription.segments.reduce((sum, s) => sum + (s.confidence || 0.9), 0) / transcription.segments.length
+
         await transcription.save()
+        console.log(`Transcription updated. FullText length: ${transcription.fullText.length}, Total words: ${transcription.totalWords}`)
 
         // Broadcast to all participants in the meeting
         io.to(`meeting-${meetingId}`).emit('new-transcription-segment', {
@@ -183,16 +193,31 @@ export const setupSocketHandlers = (io) => {
     // Handle chat messages
     socket.on('chat-message', async (data) => {
       try {
+        console.log(`Chat message received from ${socket.user.name}:`, data)
         const { meetingId, message } = data
         
+        if (!meetingId || !message) {
+          console.error('Invalid chat message data:', data)
+          socket.emit('error', { message: 'Invalid message data' })
+          return
+        }
+
         if (socket.currentMeetingId !== meetingId) {
+          console.warn(`User ${socket.userId} not in meeting ${meetingId}, current: ${socket.currentMeetingId}`)
           socket.emit('error', { message: 'Not in this meeting' })
           return
         }
 
         // Validate meeting access
         const meeting = await Meeting.findById(meetingId)
-        if (!meeting || !canUserAccessMeeting(meeting, socket.userId)) {
+        if (!meeting) {
+          console.error(`Meeting ${meetingId} not found`)
+          socket.emit('error', { message: 'Meeting not found' })
+          return
+        }
+
+        if (!canUserAccessMeeting(meeting, socket.userId)) {
+          console.warn(`User ${socket.userId} access denied to meeting ${meetingId}`)
           socket.emit('error', { message: 'Access denied' })
           return
         }
@@ -211,13 +236,22 @@ export const setupSocketHandlers = (io) => {
         await transcription.save()
 
         // Update meeting analytics
+        if (!meeting.analytics) {
+          meeting.analytics = { chatMessages: 0 }
+        }
+        if (typeof meeting.analytics.chatMessages !== 'number') {
+          meeting.analytics.chatMessages = 0
+        }
         meeting.analytics.chatMessages += 1
         await meeting.save()
 
         // Broadcast to all participants
         io.to(`meeting-${meetingId}`).emit('new-chat-message', {
           message: {
-            ...chatMessage.toObject(),
+            id: chatMessage._id || chatMessage.id,
+            message: chatMessage.message,
+            type: chatMessage.type,
+            timestamp: chatMessage.timestamp,
             user: {
               id: socket.userId,
               name: socket.user.name,
@@ -228,9 +262,15 @@ export const setupSocketHandlers = (io) => {
         })
 
         console.log(`New chat message from ${socket.user.name} in meeting ${meetingId}`)
+        
+        // Send acknowledgment back to sender
+        socket.emit('message-sent', { 
+          messageId: chatMessage._id,
+          timestamp: new Date() 
+        })
       } catch (error) {
         console.error('Error processing chat message:', error)
-        socket.emit('error', { message: 'Failed to send message' })
+        socket.emit('error', { message: 'Failed to send message', details: error.message })
       }
     })
 

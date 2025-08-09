@@ -5,7 +5,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import Meeting from '../models/Meeting.js'
 import Transcription from '../models/Transcription.js'
-import { generateSegmentId } from '../utils/transcription.js'
+import { generateSegmentId, rebuildFullText } from '../utils/transcription.js'
 import { updateUserStats } from '../utils/user.js'
 
 // Initialize AI services
@@ -209,21 +209,25 @@ export const askQuestion = async (req, res, next) => {
 export const generateSummary = async (req, res, next) => {
   try {
     const { meetingId } = req.params
+    console.log(`Generating summary for meeting ${meetingId} by user ${req.user._id}`)
 
     // Check if meeting exists and user has access
     const meeting = await Meeting.findById(meetingId)
     if (!meeting) {
+      console.error(`Meeting ${meetingId} not found`)
       return res.status(404).json({
         success: false,
         message: 'Meeting not found'
       })
     }
 
-    // Check access permissions
+    // Check access permissions - more comprehensive check
     const hasAccess = meeting.host.toString() === req.user._id.toString() ||
-                      meeting.participants.some(p => p.user.toString() === req.user._id.toString())
+                      meeting.participants.some(p => p.user.toString() === req.user._id.toString()) ||
+                      (meeting.sharedWith && meeting.sharedWith.some(s => s.user.toString() === req.user._id.toString()))
 
     if (!hasAccess) {
+      console.error(`User ${req.user._id} access denied to meeting ${meetingId}`)
       return res.status(403).json({
         success: false,
         message: 'Access denied'
@@ -232,11 +236,38 @@ export const generateSummary = async (req, res, next) => {
 
     // Get transcription
     const transcription = await Transcription.findOne({ meeting: meetingId })
-    if (!transcription || !transcription.fullText) {
+    console.log(`Transcription found:`, transcription ? 'Yes' : 'No')
+    if (transcription) {
+      console.log(`Transcription fullText length:`, transcription.fullText?.length || 0)
+      console.log(`Transcription segments count:`, transcription.segments?.length || 0)
+    }
+    
+    if (!transcription) {
+      console.error(`No transcription found for meeting ${meetingId}`)
       return res.status(404).json({
         success: false,
         message: 'No transcription available for this meeting'
       })
+    }
+    
+    if (!transcription.fullText || transcription.fullText.trim().length === 0) {
+      console.log(`FullText is empty, attempting to rebuild from ${transcription.segments.length} segments`)
+      
+      // Try to rebuild fullText from existing segments
+      if (transcription.segments && transcription.segments.length > 0) {
+        rebuildFullText(transcription)
+        await transcription.save()
+        console.log(`Rebuilt fullText: ${transcription.fullText.length} characters`)
+      }
+      
+      // Check again after rebuild
+      if (!transcription.fullText || transcription.fullText.trim().length === 0) {
+        console.error(`Still no transcription content after rebuild for meeting ${meetingId}`)
+        return res.status(404).json({
+          success: false,
+          message: 'No transcription content available for summary generation'
+        })
+      }
     }
 
     // Generate AI insights using Gemini

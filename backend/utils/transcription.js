@@ -21,14 +21,20 @@ export const addSegmentToTranscription = (transcription, segmentData) => {
 
   transcription.segments.push(segment)
 
+  // Update full text FIRST (crucial for AI summary)
+  transcription.fullText = transcription.segments
+    .map(s => s.text || '')
+    .filter(text => text.trim().length > 0)
+    .join(' ')
+    .trim()
+
   // Update statistics
   const stats = calculateTranscriptionStats(transcription.segments)
   transcription.totalWords = stats.totalWords
   transcription.speakerCount = stats.totalSpeakers
   transcription.avgConfidence = stats.averageConfidence
 
-  // Update full text
-  transcription.fullText = transcription.segments.map(s => s.text).join(' ')
+  console.log(`Added segment. FullText now: "${transcription.fullText.substring(0, 100)}..." (${transcription.fullText.length} chars)`)
 
   return segment
 }
@@ -48,6 +54,25 @@ export const addChatMessageToTranscription = (transcription, userId, message, ty
 
   transcription.chatMessages.push(chatMessage)
   return chatMessage
+}
+
+/**
+ * Rebuild fullText from existing segments (useful for corrupted transcriptions)
+ */
+export const rebuildFullText = (transcription) => {
+  if (!transcription.segments || transcription.segments.length === 0) {
+    transcription.fullText = ''
+    return transcription
+  }
+
+  transcription.fullText = transcription.segments
+    .map(s => s.text || '')
+    .filter(text => text.trim().length > 0)
+    .join(' ')
+    .trim()
+
+  console.log(`Rebuilt fullText: ${transcription.fullText.length} characters from ${transcription.segments.length} segments`)
+  return transcription
 }
 
 export const calculateTranscriptionStats = (segments) => {

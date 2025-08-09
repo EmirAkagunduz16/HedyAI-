@@ -48,6 +48,8 @@ const MeetingRoom = () => {
   const [transcription, setTranscription] = useState([])
   const [transcriptionData, setTranscriptionData] = useState(null)
   const [transcriptionLoading, setTranscriptionLoading] = useState(false)
+  // Maintain a single growing line per current speaker (in-place update)
+  const [currentSpeakerId, setCurrentSpeakerId] = useState(null)
   
   // Chat states
   const [chatMessages, setChatMessages] = useState([])
@@ -113,7 +115,73 @@ const MeetingRoom = () => {
           setParticipants(prev => prev.filter(p => p.id !== data.user.id))
         },
         onNewTranscriptionSegment: (data) => {
-          setTranscription(prev => [...prev, data.segment])
+          setTranscription(prev => {
+            const newSegment = data.segment
+            
+            // If no previous segments, add the first one
+            if (prev.length === 0) {
+              setCurrentSpeakerId(newSegment.speaker?.id || null)
+              return [newSegment]
+            }
+            
+            const lastSegment = prev[prev.length - 1]
+            const sameSpeaker = lastSegment.speaker?.id === newSegment.speaker?.id
+            
+            // If same speaker and the new text appears to be an extension/correction
+            if (sameSpeaker) {
+              // Check if new text is already contained in the last segment (avoid duplicates)
+              const lastText = lastSegment.text.toLowerCase().trim()
+              const newText = newSegment.text.toLowerCase().trim()
+              
+              // If new text is completely contained in last text, ignore it
+              if (lastText.includes(newText)) {
+                return prev
+              }
+              
+              // If last text is contained in new text, replace it (correction/completion)
+              if (newText.includes(lastText)) {
+                const updated = {
+                  ...lastSegment,
+                  text: newSegment.text.trim(),
+                  endTime: newSegment.endTime,
+                  confidence: newSegment.confidence || lastSegment.confidence
+                }
+                return [...prev.slice(0, -1), updated]
+              }
+              
+              // Otherwise, append new content (avoiding word duplication)
+              const words1 = lastText.split(/\s+/)
+              const words2 = newText.split(/\s+/)
+              
+              // Find overlap between end of first and start of second
+              let overlapLength = 0
+              for (let i = 1; i <= Math.min(words1.length, words2.length); i++) {
+                const ending = words1.slice(-i).join(' ')
+                const beginning = words2.slice(0, i).join(' ')
+                if (ending === beginning) {
+                  overlapLength = i
+                }
+              }
+              
+              // Combine texts without duplication
+              const remainingWords = words2.slice(overlapLength)
+              const combinedText = remainingWords.length > 0 
+                ? `${lastSegment.text} ${remainingWords.join(' ')}`.trim()
+                : lastSegment.text
+              
+              const updated = {
+                ...lastSegment,
+                text: combinedText,
+                endTime: newSegment.endTime,
+                confidence: Math.max(lastSegment.confidence || 0, newSegment.confidence || 0)
+              }
+              return [...prev.slice(0, -1), updated]
+            }
+            
+            // Different speaker: add new segment
+            setCurrentSpeakerId(newSegment.speaker?.id || null)
+            return [...prev, newSegment]
+          })
         },
         onNewChatMessage: (data) => {
           setChatMessages(prev => [...prev, data.message])
@@ -124,6 +192,16 @@ const MeetingRoom = () => {
             setIsRecording(data.isRecording)
             setIsPaused(data.isPaused)
           }
+        },
+        onMessageSent: (data) => {
+          console.log('Message sent successfully:', data)
+          // Message was sent successfully - no need for user feedback since it's expected
+        },
+        onSocketError: (error) => {
+          console.error('Socket error in meeting:', error)
+          if (error.message && error.message !== 'Failed to send message') {
+            toast.error(error.message)
+          }
         }
       })
 
@@ -132,8 +210,26 @@ const MeetingRoom = () => {
         socket.on(event, handler)
       })
 
-      // Join meeting room only once
-      socket.joinMeeting(meeting._id)
+      // Join meeting room only once, with retry logic
+      try {
+        console.log('Attempting to join meeting:', meeting._id)
+        socket.joinMeeting(meeting._id)
+        
+        // Wait a moment and verify connection
+        setTimeout(() => {
+          if (!socket.isConnected()) {
+            console.warn('Socket disconnected, attempting reconnection...')
+            const token = localStorage.getItem('token')
+            if (token) {
+              socket.connect(token)
+              setTimeout(() => socket.joinMeeting(meeting._id), 1000)
+            }
+          }
+        }, 2000)
+      } catch (error) {
+        console.error('Error joining meeting:', error)
+        toast.error('Failed to join meeting room')
+      }
 
       return () => {
         // Clean up event handlers
@@ -272,12 +368,8 @@ const MeetingRoom = () => {
           // Handle the response
           if (result && result.data && result.data.segment) {
             const segment = result.data.segment
-            console.log('Transcription received:', segment.text)
-            
             // Send to socket for real-time updates
             socket.sendTranscriptionSegment(meeting._id, segment)
-          } else {
-            console.log('No speech detected in audio chunk')
           }
         } catch (error) {
           console.error('Failed to process audio chunk:', error)
@@ -312,25 +404,94 @@ const MeetingRoom = () => {
       // Start Web Speech API for instant on-screen text (best-effort)
       if (!webSpeechRef.current) webSpeechRef.current = new WebSpeechService()
       if (webSpeechRef.current.isSupported) {
+        let lastInterimText = ''
+        let speechRestartTimer = null
+        
+        // Auto-restart Web Speech API if it stops
+        const startSpeechRecognition = () => {
+          try {
+            webSpeechRef.current.start('en-US')
+            console.log('Web Speech API started')
+          } catch (error) {
+            console.warn('Failed to start Web Speech API:', error)
+          }
+        }
+        
         webSpeechRef.current.onResult = ({ text, isFinal }) => {
           if (!text) return
-          // Render immediate transcript locally, tag it clearly
-          const segment = {
-            id: `local_${Date.now()}`,
-            text,
-            startTime: Date.now() / 1000,
-            endTime: Date.now() / 1000,
-            speaker: { id: user.id, name: user.name },
-            confidence: 0.85
+          
+          // Only update if this is a final result or significantly different from last interim
+          if (isFinal || text !== lastInterimText) {
+            setTranscription((prev) => {
+              // Check if we should create a new segment or update existing
+              if (prev.length === 0 || 
+                  prev[prev.length - 1].speaker?.id !== user.id ||
+                  !prev[prev.length - 1].text.includes('[live]')) {
+                // Create new segment for Web Speech interim results
+                return [
+                  ...prev.filter(seg => !seg.text.includes('[live]')), // Remove any existing live segments
+                  {
+                    id: `webspeech_${Date.now()}`,
+                    text: isFinal ? text.trim() : `${text.trim()} [live]`,
+                    startTime: Date.now() / 1000,
+                    endTime: Date.now() / 1000,
+                    speaker: { id: user.id, name: user.name },
+                    confidence: isFinal ? 0.9 : 0.7,
+                    isInterim: !isFinal
+                  }
+                ]
+              } else {
+                // Update the last segment if it's from the same speaker
+                const lastSegment = prev[prev.length - 1]
+                if (lastSegment.speaker?.id === user.id) {
+                  const updated = {
+                    ...lastSegment,
+                    text: isFinal ? text.trim() : `${text.trim()} [live]`,
+                    endTime: Date.now() / 1000,
+                    confidence: isFinal ? 0.9 : 0.7,
+                    isInterim: !isFinal
+                  }
+                  return [...prev.slice(0, -1), updated]
+                }
+                return prev
+              }
+            })
+            
+            if (!isFinal) {
+              lastInterimText = text
+            } else {
+              lastInterimText = ''
+            }
           }
-          setTranscription((prev) => [...prev, segment])
         }
-        webSpeechRef.current.start('en-US')
+        
+        webSpeechRef.current.onEnd = () => {
+          console.log('Web Speech API ended, restarting in 1 second...')
+          if (isRecording && !isPaused) {
+            speechRestartTimer = setTimeout(startSpeechRecognition, 1000)
+          }
+        }
+        
+        webSpeechRef.current.onError = (error) => {
+          console.warn('Web Speech API error:', error)
+          if (isRecording && !isPaused && error.error !== 'no-speech') {
+            speechRestartTimer = setTimeout(startSpeechRecognition, 2000)
+          }
+        }
+        
+        startSpeechRecognition()
+        
+        // Store the restart timer to clean up later
+        webSpeechRef.current.restartTimer = speechRestartTimer
       }
       
       // Start meeting if not already started
       if (meeting.status !== 'live') {
-        await meetingsAPI.startMeeting(meeting._id)
+        const startResult = await meetingsAPI.startMeeting(meeting._id)
+        if (startResult.success) {
+          // Update local meeting state to reflect it's now live
+          setMeeting(prev => ({ ...prev, status: 'live', startedAt: new Date() }))
+        }
       }
 
       setIsRecording(true)
@@ -372,15 +533,73 @@ const MeetingRoom = () => {
       }
       if (webSpeechRef.current) {
         webSpeechRef.current.stop()
+        // Clear any restart timers
+        if (webSpeechRef.current.restartTimer) {
+          clearTimeout(webSpeechRef.current.restartTimer)
+          webSpeechRef.current.restartTimer = null
+        }
       }
       
       setIsRecording(false)
       setIsPaused(false)
       setAudioLevel(0)
       
-      // End meeting
-      if (meeting.status === 'live') {
-        await meetingsAPI.endMeeting(meeting._id)
+      // End meeting only if host - check current meeting status first
+      if (meeting.host?._id === user.id) {
+        try {
+          // Get current meeting status to ensure it's live before ending
+          const currentMeeting = await meetingsAPI.getMeeting(meeting._id)
+          if (currentMeeting.success && currentMeeting.data.meeting.status === 'live') {
+            await meetingsAPI.endMeeting(meeting._id)
+            // Update local meeting state
+            setMeeting(prev => ({ ...prev, status: 'completed' }))
+            
+            // Generate AI summary automatically after a short delay to allow final transcription processing
+            setTimeout(async () => {
+              try {
+                // Check if there's transcription content before attempting summary
+                if (!transcriptionData || !transcription || transcription.length === 0) {
+                  console.log('No transcription content available for automatic summary generation')
+                  toast.info('Meeting ended. No transcription content available for AI summary.')
+                  return
+                }
+
+                console.log('Generating AI summary for meeting:', meeting._id)
+                console.log('Current transcription segments:', transcription.length)
+                
+                const summaryResponse = await aiAPI.generateSummary(meeting._id)
+                if (summaryResponse.success) {
+                  toast.success('AI summary generated!')
+                  // Update meeting with summary data
+                  setMeeting(prev => ({ 
+                    ...prev, 
+                    aiInsights: summaryResponse.data.insights 
+                  }))
+                } else {
+                  console.warn('AI summary generation failed:', summaryResponse)
+                  toast.error('Failed to generate AI summary')
+                }
+              } catch (error) {
+                console.error('Failed to generate AI summary:', error)
+                if (error.response?.status === 404) {
+                  const message = error.response?.data?.message || 'No content found'
+                  if (message.includes('transcription content')) {
+                    toast.info('Meeting ended. No transcription content available for AI summary.')
+                  } else {
+                    toast.error('No transcription found for summary generation')
+                  }
+                } else if (error.response?.status === 403) {
+                  toast.error('Access denied for summary generation')
+                } else {
+                  toast.error('Failed to generate AI summary. Please try again.')
+                }
+              }
+            }, 5000) // Wait 5 seconds for final transcription to complete
+          }
+        } catch (err) {
+          console.warn('End meeting skipped:', err?.response?.data?.message || err.message)
+          // Don't show error to user as this is not critical
+        }
       }
       
       // Notify other participants via socket
@@ -397,7 +616,19 @@ const MeetingRoom = () => {
     if (!newMessage.trim()) return
 
     try {
+      // Check if socket is connected and we're in a meeting
+      if (!socket.isConnected()) {
+        toast.error('Not connected to server. Please refresh the page.')
+        return
+      }
+
+      if (!meeting?._id) {
+        toast.error('Meeting not found')
+        return
+      }
+
       // Send message via socket for real-time updates
+      console.log('Sending message via socket:', newMessage.trim())
       socket.sendChatMessage(meeting._id, newMessage.trim())
       
       // Also ask AI if it's a question
@@ -406,10 +637,14 @@ const MeetingRoom = () => {
         try {
           const response = await aiAPI.askQuestion(meeting._id, newMessage.trim())
           if (response.success) {
-            // AI response will come through socket
+            // AI response will come through socket or we can manually add it
+            if (response.data.aiMessage) {
+              setChatMessages(prev => [...prev, response.data.aiMessage])
+            }
           }
         } catch (error) {
           console.error('AI question failed:', error)
+          toast.error('AI response failed')
         } finally {
           setIsAITyping(false)
         }
@@ -651,11 +886,226 @@ const MeetingRoom = () => {
                     )}
                   </div>
                 ) : (
-                  <div className="h-96 flex items-center justify-center text-gray-500">
-                    <div className="text-center">
-                      <MessageSquare className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                      <p>AI summary will be generated after recording</p>
-                    </div>
+                  <div className="h-96 overflow-y-auto">
+                    {meeting?.aiInsights?.summary ? (
+                      <div className="space-y-6">
+                        {/* Summary */}
+                        <div>
+                          <h4 className="text-lg font-semibold text-gray-900 mb-3">Meeting Summary</h4>
+                          <p className="text-gray-700 leading-relaxed">{meeting.aiInsights.summary}</p>
+                        </div>
+
+                        {/* Key Points */}
+                        {meeting.aiInsights.keyPoints && meeting.aiInsights.keyPoints.length > 0 && (
+                          <div>
+                            <h4 className="text-lg font-semibold text-gray-900 mb-3">Key Points</h4>
+                            <ul className="space-y-2">
+                              {meeting.aiInsights.keyPoints.map((point, index) => (
+                                <li key={index} className="flex items-start">
+                                  <span className="w-2 h-2 bg-primary-500 rounded-full mt-2 mr-3 flex-shrink-0"></span>
+                                  <span className="text-gray-700">{point}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {/* Action Items */}
+                        {meeting.aiInsights.actionItems && meeting.aiInsights.actionItems.length > 0 && (
+                          <div>
+                            <h4 className="text-lg font-semibold text-gray-900 mb-3">Action Items</h4>
+                            <div className="space-y-3">
+                              {meeting.aiInsights.actionItems.map((item, index) => (
+                                <div key={index} className="border border-gray-200 rounded-lg p-3">
+                                  <div className="flex items-center justify-between">
+                                    <span className="font-medium text-gray-900">{item.task}</span>
+                                    <span className={`px-2 py-1 rounded-full text-xs font-medium ${
+                                      item.priority === 'high' ? 'bg-red-100 text-red-800' :
+                                      item.priority === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                                      'bg-green-100 text-green-800'
+                                    }`}>
+                                      {item.priority}
+                                    </span>
+                                  </div>
+                                  {item.assignee && (
+                                    <p className="text-sm text-gray-600 mt-1">Assigned to: {item.assignee}</p>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Topics */}
+                        {meeting.aiInsights.topics && meeting.aiInsights.topics.length > 0 && (
+                          <div>
+                            <h4 className="text-lg font-semibold text-gray-900 mb-3">Topics Discussed</h4>
+                            <div className="flex flex-wrap gap-2">
+                              {meeting.aiInsights.topics.map((topic, index) => (
+                                <span key={index} className="px-3 py-1 bg-gray-100 text-gray-800 rounded-full text-sm">
+                                  {topic}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="h-full flex items-center justify-center text-gray-500">
+                        <div className="text-center">
+                          <MessageSquare className="h-12 w-12 mx-auto mb-4 opacity-50" />
+                          <p>
+                            {meeting?.status === 'completed' ? 
+                              'AI summary will be generated automatically, or click below to generate now.' : 
+                              'AI summary will be generated after recording'
+                            }
+                          </p>
+                          {meeting?.status === 'completed' && (
+                            <div className="mt-4">
+                              <div className="space-y-3">
+                                <button
+                                  onClick={async () => {
+                                    try {
+                                      // Check if there's transcription content first
+                                      if (!transcriptionData || !transcription || transcription.length === 0) {
+                                        toast.error('No transcription available. Please record the meeting first to generate a summary.')
+                                        return
+                                      }
+
+                                      console.log('Manual AI summary - Meeting ID:', meeting._id)
+                                      console.log('Manual AI summary - Transcription segments:', transcription.length)
+                                      
+                                      const summaryResponse = await aiAPI.generateSummary(meeting._id)
+                                      console.log('Manual AI summary response:', summaryResponse)
+                                      if (summaryResponse.success) {
+                                        toast.success('AI summary generated!')
+                                        setMeeting(prev => ({ 
+                                          ...prev, 
+                                          aiInsights: summaryResponse.data.insights 
+                                        }))
+                                      } else {
+                                        console.error('AI summary failed with response:', summaryResponse)
+                                        toast.error('Failed to generate AI summary: ' + (summaryResponse.message || 'Unknown error'))
+                                      }
+                                    } catch (error) {
+                                      console.error('Manual AI summary failed:', error)
+                                      console.error('Error response data:', error.response?.data)
+                                      console.error('Error status:', error.response?.status)
+                                      
+                                      // Provide specific error messages based on the response
+                                      if (error.response?.status === 404) {
+                                        const message = error.response?.data?.message || 'No content found'
+                                        if (message.includes('transcription content')) {
+                                          toast.error('No transcription content available. Please record the meeting first to generate a summary.')
+                                        } else {
+                                          toast.error(message)
+                                        }
+                                      } else if (error.response?.status === 403) {
+                                        toast.error('Access denied. You may not have permission to generate summaries for this meeting.')
+                                      } else {
+                                        toast.error('Failed to generate AI summary: ' + (error.response?.data?.message || error.message))
+                                      }
+                                    }
+                                  }}
+                                  disabled={!transcriptionData || !transcription || transcription.length === 0}
+                                  className={`btn ${(!transcriptionData || !transcription || transcription.length === 0) ? 'btn-gray cursor-not-allowed' : 'btn-primary'}`}
+                                  title={(!transcriptionData || !transcription || transcription.length === 0) ? 'No transcription content available. Record the meeting first.' : 'Generate AI summary from transcription'}
+                                >
+                                  Generate AI Summary
+                                </button>
+                                
+                                {(!transcriptionData || !transcription || transcription.length === 0) && (
+                                  <p className="text-sm text-gray-500 italic">
+                                    💡 No transcription content available. Start recording to enable AI summary generation.
+                                  </p>
+                                )}
+                                
+                                <button
+                                  onClick={async () => {
+                                    try {
+                                      console.log('Debug - Current transcription data:', transcriptionData)
+                                      console.log('Debug - Current transcription segments:', transcription)
+                                      console.log('Debug - Meeting ID:', meeting._id)
+                                      
+                                      // Show detailed segment info
+                                      transcription.forEach((segment, index) => {
+                                        console.log(`Segment ${index}:`, {
+                                          text: segment.text,
+                                          speaker: segment.speaker,
+                                          length: segment.text?.length || 0
+                                        })
+                                      })
+                                      
+                                      // Try to reload transcription
+                                      await loadTranscription()
+                                      toast.success('Transcription reloaded')
+                                    } catch (error) {
+                                      console.error('Failed to reload transcription:', error)
+                                      toast.error('Failed to reload transcription')
+                                    }
+                                  }}
+                                  className="btn btn-secondary text-sm"
+                                >
+                                  Debug: Reload Transcription
+                                </button>
+                                
+                                <button
+                                  onClick={async () => {
+                                    try {
+                                      console.log('Rebuilding fullText from frontend segments...')
+                                      
+                                      // Build fullText from current segments
+                                      const fullText = transcription
+                                        .map(segment => segment.text || '')
+                                        .filter(text => text.trim().length > 0)
+                                        .join(' ')
+                                        .trim()
+                                      
+                                      console.log('Built fullText:', {
+                                        length: fullText.length,
+                                        preview: fullText.substring(0, 100) + '...',
+                                        wordCount: fullText.split(' ').filter(w => w.trim()).length
+                                      })
+                                      
+                                      if (fullText.length === 0) {
+                                        toast.error('No text content found in segments')
+                                        return
+                                      }
+                                      
+                                      // Send to backend to update
+                                      const response = await fetch(`http://localhost:5000/api/transcriptions/meeting/${meeting._id}/rebuild`, {
+                                        method: 'POST',
+                                        headers: {
+                                          'Content-Type': 'application/json',
+                                          'Authorization': `Bearer ${localStorage.getItem('token')}`
+                                        },
+                                        body: JSON.stringify({ fullText })
+                                      })
+                                      
+                                      if (response.ok) {
+                                        const result = await response.json()
+                                        console.log('FullText rebuild response:', result)
+                                        toast.success(`FullText rebuilt: ${fullText.split(' ').length} words`)
+                                      } else {
+                                        const error = await response.json()
+                                        console.error('Rebuild failed:', error)
+                                        toast.error('Failed to rebuild fullText: ' + error.message)
+                                      }
+                                    } catch (error) {
+                                      console.error('Failed to rebuild fullText:', error)
+                                      toast.error('Failed to rebuild fullText')
+                                    }
+                                  }}
+                                  className="btn btn-warning text-sm"
+                                >
+                                  Fix: Rebuild FullText
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

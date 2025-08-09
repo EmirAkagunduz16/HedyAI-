@@ -39,9 +39,10 @@ class SocketService {
 
     this.socket.on('error', (error) => {
       console.error('Socket error:', error)
-      // Only show toast for non-connection related errors
-      if (error.type !== 'TransportError' && error.type !== 'polling-error') {
-        toast.error(error.message || 'Connection error')
+      const msg = typeof error === 'string' ? error : (error?.message || 'Connection error')
+      // Avoid spamming UI for expected pings
+      if (msg !== 'Failed to send message') {
+        toast.error(msg)
       }
     })
 
@@ -98,8 +99,17 @@ class SocketService {
 
   // Chat methods
   sendChatMessage(meetingId, message) {
-    if (!this.socket) return
+    if (!this.socket || !this.socket.connected) {
+      console.error('Socket not connected when trying to send chat message')
+      throw new Error('Socket not connected')
+    }
     
+    if (!meetingId) {
+      console.error('No meeting ID provided for chat message')
+      throw new Error('Meeting ID required')
+    }
+    
+    console.log('Socket: Emitting chat-message', { meetingId, message })
     this.socket.emit('chat-message', {
       meetingId,
       message
@@ -238,6 +248,18 @@ export const createMeetingHandlers = (callbacks = {}) => {
     'participant-status-changed': (data) => {
       console.log('Participant status changed:', data)
       callbacks.onParticipantStatusChanged?.(data)
+    },
+
+    // Message acknowledgment events
+    'message-sent': (data) => {
+      console.log('Message sent confirmation:', data)
+      callbacks.onMessageSent?.(data)
+    },
+
+    // Enhanced error handling
+    'error': (error) => {
+      console.error('Socket error:', error)
+      callbacks.onSocketError?.(error)
     }
   }
 

@@ -3,9 +3,12 @@ import { verifyToken } from '../utils/jwt.js'
 
 export const authenticate = async (req, res, next) => {
   try {
+    console.log(`Auth middleware - ${req.method} ${req.originalUrl}`)
     const authHeader = req.header('Authorization')
+    console.log(`Auth header present: ${!!authHeader}, starts with Bearer: ${authHeader?.startsWith('Bearer ')}`)
     
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      console.log('Auth failed: No token or invalid format')
       return res.status(401).json({ 
         message: 'Access denied. No token provided or invalid format.' 
       })
@@ -15,14 +18,18 @@ export const authenticate = async (req, res, next) => {
 
     try {
       const decoded = verifyToken(token)
+      console.log(`Token decoded successfully for user: ${decoded.userId}`)
       const user = await User.findById(decoded.userId)
       
       if (!user) {
+        console.log(`User not found for ID: ${decoded.userId}`)
         return res.status(401).json({ 
           message: 'Invalid token. User not found.' 
         })
       }
 
+      console.log(`Authentication successful for user: ${user.name} (${user._id})`)
+      
       // Update last login
       user.lastLogin = new Date()
       await user.save()
@@ -30,6 +37,7 @@ export const authenticate = async (req, res, next) => {
       req.user = user
       next()
     } catch (jwtError) {
+      console.log('JWT verification failed:', jwtError.message)
       return res.status(401).json({ 
         message: 'Invalid token.' 
       })

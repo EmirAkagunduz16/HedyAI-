@@ -431,6 +431,81 @@ export const exportTranscription = async (req, res, next) => {
   }
 }
 
+export const rebuildFullText = async (req, res, next) => {
+  try {
+    const { meetingId } = req.params
+    const { fullText } = req.body
+
+    console.log(`Rebuilding fullText for meeting ${meetingId}`)
+    console.log(`Received fullText length: ${fullText?.length || 0}`)
+
+    // Check if meeting exists and user has access
+    const meeting = await Meeting.findById(meetingId)
+    if (!meeting) {
+      return res.status(404).json({
+        success: false,
+        message: 'Meeting not found'
+      })
+    }
+
+    // Check access permissions
+    const hasAccess = meeting.host.toString() === req.user._id.toString() ||
+                      meeting.participants.some(p => p.user.toString() === req.user._id.toString())
+
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: 'Access denied'
+      })
+    }
+
+    // Get or create transcription
+    let transcription = await Transcription.findOne({ meeting: meetingId })
+    if (!transcription) {
+      return res.status(404).json({
+        success: false,
+        message: 'Transcription not found'
+      })
+    }
+
+    // Update fullText and recalculate statistics
+    transcription.fullText = fullText || ''
+    transcription.totalWords = fullText ? fullText.split(' ').filter(word => word.trim()).length : 0
+    
+    if (transcription.segments && transcription.segments.length > 0) {
+      transcription.speakerCount = new Set(transcription.segments.map(s => s.speaker?.id).filter(Boolean)).size
+      transcription.avgConfidence = transcription.segments.reduce((sum, s) => sum + (s.confidence || 0.9), 0) / transcription.segments.length
+    } else {
+      transcription.speakerCount = 0
+      transcription.avgConfidence = 0
+    }
+
+    await transcription.save()
+
+    console.log(`FullText rebuilt successfully:`, {
+      meetingId,
+      fullTextLength: transcription.fullText.length,
+      totalWords: transcription.totalWords,
+      speakerCount: transcription.speakerCount,
+      segmentCount: transcription.segments.length
+    })
+
+    res.json({
+      success: true,
+      message: 'FullText rebuilt successfully',
+      data: {
+        fullTextLength: transcription.fullText.length,
+        totalWords: transcription.totalWords,
+        speakerCount: transcription.speakerCount,
+        segmentCount: transcription.segments.length
+      }
+    })
+  } catch (error) {
+    console.error('Error rebuilding fullText:', error)
+    next(error)
+  }
+}
+
 // Helper function to convert segments to SRT format
 function convertToSRT(segments) {
   return segments.map((segment, index) => {
