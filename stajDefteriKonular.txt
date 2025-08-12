@@ -1,0 +1,93 @@
+4. GÜN - Authentication System Frontend
+Login ve Register sayfaları (basit form)
+Navbar güncellemesi: Authentication durumuna göre Login/Register vs User menu
+AuthContext ile state yönetimi
+Form validasyonları
+5. GÜN - Backend Authentication API
+User model, JWT token sistemi
+Auth middleware geliştirilmesi
+Navbar güncellemesi: User bilgilerini gösterme (isim, avatar)
+6. GÜN - Meeting Management Backend
+Meeting model tasarımı
+CRUD işlemleri
+Navbar güncellemesi: "New Meeting" linki eklenmesi
+7. GÜN - Dashboard Frontend Geliştirme
+Dashboard layout (temel stats kartları)
+Navbar güncellemesi: Dashboard linki aktif hale getirme
+Meeting listesi component (basit liste)
+Temel API entegrasyonu
+8. GÜN - Meeting Room Frontend - Temel Yapı
+Meeting room sayfası (basit layout)
+Ses kayıt butonları (sadece görsel)
+Temel timer
+Dashboard güncellemesi: Recent meetings tablosuna temel veriler
+9. GÜN - Socket.IO Real-time Komunikasyon
+Backend Socket.IO server
+Frontend Socket.IO client
+Navbar güncellemesi: Real-time notification badge eklenmesi
+Meeting Room güncellemesi: Participant listesi real-time
+10. GÜN - Audio Recording Service
+Web Audio API entegrasyonu
+Meeting Room güncellemesi: Gerçek ses kaydı functionality
+Audio level visualization
+Navbar güncellemesi: Mikrofon permission indicator
+11. GÜN - Transcription Model ve Backend
+Transcription model
+Meeting Room güncellemesi: Transcription panel eklenmesi
+Segment-based yapı
+12. GÜN - Google Gemini AI Entegrasyonu
+Gemini API kurulumu
+Meeting Room güncellemesi: AI-powered transcription
+Error handling
+13. GÜN - Real-time Transcription Sistemi
+Web Speech API
+Meeting Room güncellemesi: Live transcription görüntüleme
+Socket.IO ile broadcasting
+14. GÜN - Chat System ve AI Q&A
+Meeting Room güncellemesi: Chat panel eklenmesi
+AI Q&A functionality
+Navbar güncellemesi: Chat notification sistemi
+15. GÜN - AI Summary Generation
+Meeting Room güncellemesi: AI Summary tab eklenmesi
+Key points extraction
+Dashboard güncellemesi: Meeting'lerde AI insights gösterimi
+16. GÜN - Advanced UI Components
+Meeting Room güncellemesi: Audio level visualizer
+Navbar güncellemesi: Search functionality eklenmesi
+Modal sistemleri
+17. GÜN - Data Export ve Search Functionality
+Meeting Room güncellemesi: Export butonları
+Dashboard güncellemesi: Search ve filter options
+Navbar güncellemesi: Global search
+18. GÜN - User Profile ve Settings
+Profile sayfası oluşturma
+Navbar güncellemesi: Profile dropdown menu
+Dashboard güncellemesi: User statistics
+19. GÜN - Error Handling ve Validation
+Tüm component'lerde: Error boundary'ler
+Navbar güncellemesi: Connection status indicator
+User-friendly error messages
+20. GÜN - Performance Optimization
+Dashboard güncellemesi: Loading states optimization
+Meeting Room güncellemesi: Memory leak fixes
+Navbar güncellemesi: Lazy loading
+21. GÜN - Security Enhancements
+Backend güncellemesi: Rate limiting, CORS
+Navbar güncellemesi: Secure logout
+Input sanitization
+22. GÜN - Testing Implementation
+Component testing
+Meeting Room güncellemesi: Bug fixes from testing
+Dashboard güncellemesi: Data accuracy fixes
+23. GÜN - Deployment Preparation
+Environment configuration
+Navbar güncellemesi: Production-ready optimizations
+Build optimization
+24. GÜN - Final Integration ve Bug Fixes
+Navbar güncellemesi: Final UI polish
+Meeting Room güncellemesi: Performance tuning
+Dashboard güncellemesi: Analytics improvements
+25. GÜN - Documentation ve Project Finalization
+Code cleanup
+Navbar güncellemesi: Accessibility improvements
+Final testing
